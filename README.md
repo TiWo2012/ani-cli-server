@@ -1,20 +1,21 @@
 # ani-cli-ui (web)
 
-Web interface for `ani-cli` with:
-- anime search
-- full-season download
-- episode watch launch
-- poster artwork cards (fetched online)
+Web app for `ani-cli` on port `9119`.
 
-Default mode is `dub`.
+## What it does
 
-## Run (port 9119)
+- Search anime (`dub` default, optional `sub`)
+- Click a poster to open episode selection
+- Click an episode to **download first**, then play it **inside the browser**
+- Optional full-season download button
+
+## Run
 
 ```bash
 python3 main.py
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:9119
@@ -23,10 +24,10 @@ http://127.0.0.1:9119
 ## Requirements
 
 - Python 3.10+
-- `ani-cli` in `PATH`
-- internet access (search + poster APIs)
+- `ani-cli` installed in `PATH`
+- internet access (anime search + poster lookup)
 
 ## Notes
 
-- `Download Season` starts `ani-cli -d` for `1-N` episodes of the selected result.
-- `Watch Episode` launches playback for the specific episode number.
+- Downloaded video files are stored in `downloads/`.
+- Browser playback support depends on the downloaded container/codec.

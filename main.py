@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Web UI for ani-cli search/download/watch on port 9119."""
+"""Web UI for ani-cli with download-then-playback in browser."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
+import os
+from pathlib import Path
 import subprocess
+import threading
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -15,7 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ALLANIME_API = "https://api.allanime.day/api"
 ALLANIME_REFERER = "https://allanime.to"
 JIKAN_API = "https://api.jikan.moe/v4/anime"
-USER_AGENT = "ani-cli-web-ui/1.0"
+USER_AGENT = "ani-cli-web-ui/2.0"
+VIDEO_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
 
 SEARCH_QUERY = (
     "query( $search: SearchInput $limit: Int $page: Int "
@@ -25,6 +31,10 @@ SEARCH_QUERY = (
     "translationType: $translationType countryOrigin: $countryOrigin ) { "
     "edges { _id name availableEpisodes __typename } }}"
 )
+
+DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+DOWNLOAD_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -47,7 +57,7 @@ def search_anime(query: str, mode: str = "dub") -> list[AnimeResult]:
 
     variables = {
         "search": {"allowAdult": False, "allowUnknown": False, "query": query},
-        "limit": 24,
+        "limit": 20,
         "page": 1,
         "translationType": mode,
         "countryOrigin": "ALL",
@@ -67,161 +77,293 @@ def search_anime(query: str, mode: str = "dub") -> list[AnimeResult]:
     )
 
     edges = payload.get("data", {}).get("shows", {}).get("edges", [])
-    base_results: list[tuple[str, str, int]] = []
+    raw_results: list[tuple[str, str, int]] = []
     for edge in edges:
         anime_id = edge.get("_id")
         name = edge.get("name")
         episodes = int((edge.get("availableEpisodes", {}) or {}).get(mode, 0) or 0)
         if anime_id and name and episodes > 0:
-            base_results.append((anime_id, name, episodes))
+            raw_results.append((anime_id, name, episodes))
 
-    return [AnimeResult(id=i, name=n, episodes=e, image_url=find_cover_image(n)) for i, n, e in base_results]
+    results: list[AnimeResult] = []
+    for anime_id, name, episodes in raw_results:
+        results.append(AnimeResult(id=anime_id, name=name, episodes=episodes, image_url=find_cover_image(name)))
+    return results
 
 
 def find_cover_image(title: str) -> str:
-    query = urllib.parse.urlencode({"q": title, "limit": 1, "sfw": "true"})
-    url = f"{JIKAN_API}?{query}"
+    params = urllib.parse.urlencode({"q": title, "limit": 1, "sfw": "true"})
     try:
-        payload = fetch_json(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+        payload = fetch_json(f"{JIKAN_API}?{params}", headers={"User-Agent": USER_AGENT}, timeout=8)
     except Exception:
         return ""
-
-    items = payload.get("data") or []
-    if not items:
+    entries = payload.get("data") or []
+    if not entries:
         return ""
-
-    images = (items[0].get("images") or {}).get("jpg") or {}
-    return images.get("image_url") or ""
+    return (((entries[0].get("images") or {}).get("jpg") or {}).get("image_url")) or ""
 
 
-def run_ani_cli(query: str, mode: str, search_index: int, episode_range: str, download: bool) -> tuple[bool, str]:
-    cmd = ["ani-cli", "-S", str(search_index), "-e", episode_range]
+def build_ani_cmd(query: str, mode: str, search_index: int, episode_expr: str, download: bool) -> list[str]:
+    cmd = ["ani-cli", "-S", str(search_index), "-e", episode_expr]
     if download:
         cmd.insert(1, "-d")
     if mode == "dub":
         cmd.append("--dub")
     cmd.append(query)
+    return cmd
+
+
+def media_snapshot() -> dict[Path, float]:
+    snap: dict[Path, float] = {}
+    for item in DOWNLOAD_DIR.iterdir():
+        if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS:
+            snap[item] = item.stat().st_mtime
+    return snap
+
+
+def detect_downloaded_file(before: dict[Path, float], started_at: float) -> Path | None:
+    after = media_snapshot()
+    new_files = [p for p in after if p not in before]
+    if new_files:
+        return max(new_files, key=lambda p: after[p])
+
+    updated = [p for p, mtime in after.items() if p in before and mtime > before[p]]
+    if updated:
+        return max(updated, key=lambda p: after[p])
+
+    recent = [p for p, mtime in after.items() if mtime >= started_at - 1]
+    if recent:
+        return max(recent, key=lambda p: after[p])
+
+    return None
+
+
+def download_episode_for_browser(query: str, mode: str, search_index: int, episode: int) -> tuple[bool, str, Path | None]:
+    cmd = build_ani_cmd(query, mode, search_index, str(episode), download=True)
+    before = media_snapshot()
+    started = time.time()
+
+    env = os.environ.copy()
+    env["ANI_CLI_DOWNLOAD_DIR"] = str(DOWNLOAD_DIR)
 
     try:
-        subprocess.Popen(cmd)
+        completed = subprocess.run(cmd, cwd=str(DOWNLOAD_DIR), env=env, capture_output=True, text=True)
+    except FileNotFoundError:
+        return False, "ani-cli is not installed or not in PATH", None
+    except Exception as exc:
+        return False, str(exc), None
+
+    if completed.returncode != 0:
+        err = (completed.stderr or completed.stdout or "download failed").strip()
+        return False, err, None
+
+    video_file = detect_downloaded_file(before, started)
+    if video_file is None:
+        return False, "download finished but output file was not detected", None
+
+    return True, f"Downloaded episode {episode}", video_file
+
+
+def start_background_season_download(query: str, mode: str, search_index: int, episodes: int) -> tuple[bool, str]:
+    cmd = build_ani_cmd(query, mode, search_index, f"1-{episodes}", download=True)
+    env = os.environ.copy()
+    env["ANI_CLI_DOWNLOAD_DIR"] = str(DOWNLOAD_DIR)
+    try:
+        subprocess.Popen(cmd, cwd=str(DOWNLOAD_DIR), env=env)
     except FileNotFoundError:
         return False, "ani-cli is not installed or not in PATH"
     except Exception as exc:
         return False, str(exc)
-
-    action = "download" if download else "watch"
-    return True, f"Started {action}: {episode_range}"
+    return True, f"Started full season download (1-{episodes})"
 
 
 PAGE_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
-  <title>ani-cli web</title>
-  <style>
-    :root {
-      --bg:#0d1b2a;
-      --bg2:#1b263b;
-      --card:#ffffff;
-      --ink:#102a43;
-      --muted:#486581;
-      --accent:#ef476f;
-      --accent2:#06d6a0;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
-      color: #fff;
-      background: radial-gradient(circle at 10% 10%, #415a77, var(--bg) 60%), linear-gradient(130deg, var(--bg2), #0f172a);
-      min-height: 100vh;
-    }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
-    h1 { margin: 0 0 4px; letter-spacing: 0.5px; }
-    .sub { margin: 0 0 18px; color: #c8d6e5; }
-    .bar {
-      display: grid;
-      grid-template-columns: 1fr auto auto;
-      gap: 10px;
-      margin-bottom: 18px;
-    }
-    input, select, button {
-      border-radius: 10px;
-      border: none;
-      padding: 12px 14px;
-      font-size: 15px;
-    }
-    input, select { background: #f7fafc; color: #102a43; }
-    button {
-      cursor: pointer;
-      font-weight: 700;
-      color: #fff;
-      background: linear-gradient(90deg, #ef476f, #f78c6b);
-    }
-    #status { margin-bottom: 14px; color: #d9e2ec; min-height: 24px; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-      gap: 14px;
-    }
-    .card {
-      background: var(--card);
-      color: var(--ink);
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 8px 30px rgba(0,0,0,.25);
-      display: grid;
-      grid-template-rows: 300px auto;
-    }
-    .poster { width: 100%; height: 100%; object-fit: cover; background: #d9e2ec; }
-    .meta { padding: 10px 10px 12px; }
-    .title { font-size: 14px; line-height: 1.35; min-height: 40px; margin-bottom: 6px; font-weight: 700; }
-    .eps { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-    .row { display: grid; grid-template-columns: 1fr; gap: 6px; }
-    .btn2 { background: linear-gradient(90deg, #118ab2, #073b4c); }
-    .watch {
-      display: grid;
-      grid-template-columns: 70px 1fr;
-      gap: 6px;
-    }
-    .tiny { padding: 8px 10px; font-size: 13px; }
-  </style>
+<meta charset=\"utf-8\" />
+<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+<title>ani-cli browser player</title>
+<style>
+:root {
+  --bg1:#0f172a;
+  --bg2:#14213d;
+  --panel:#f8fafc;
+  --ink:#102a43;
+  --muted:#5c6f82;
+  --primary:#e63946;
+  --primary2:#f77f00;
+  --ok:#2a9d8f;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: #fff;
+  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(1000px 480px at 5% -10%, #2b4c7e, transparent 60%),
+    radial-gradient(900px 420px at 100% 0%, #5a189a55, transparent 60%),
+    linear-gradient(135deg, var(--bg2), var(--bg1));
+}
+.wrap { max-width: 1300px; margin: 0 auto; padding: 20px; }
+h1 { margin: 0 0 8px; }
+.sub { margin: 0 0 16px; color: #dbe7f3; }
+.search {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+input, select, button {
+  border: 0;
+  border-radius: 10px;
+  padding: 11px 13px;
+  font-size: 15px;
+}
+input, select { background: #f1f5f9; color: #0f172a; }
+button {
+  cursor: pointer;
+  color: #fff;
+  font-weight: 700;
+  background: linear-gradient(90deg, var(--primary), var(--primary2));
+}
+button.alt { background: linear-gradient(90deg, #1d3557, #457b9d); }
+button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
+#status { min-height: 22px; margin-bottom: 10px; color: #dbe7f3; }
+.player {
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+  box-shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
+}
+.player video { width: 100%; max-height: 56vh; display: block; background: #000; }
+.player .meta { padding: 8px 10px; font-size: 14px; color: #cbd5e1; background: #0b1220; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+.card {
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 30px rgba(0,0,0,.28);
+}
+.poster-wrap { position: relative; cursor: pointer; }
+.poster { width: 100%; height: 320px; object-fit: cover; display: block; background: #dde7f0; }
+.tap-hint {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  background: rgba(16,42,67,.85);
+  color: #fff;
+  font-size: 12px;
+  padding: 5px 8px;
+  border-radius: 7px;
+}
+.meta { padding: 10px; }
+.title { font-size: 14px; font-weight: 700; line-height: 1.35; min-height: 38px; margin-bottom: 4px; }
+.eps { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+.episodes { display: none; margin-top: 8px; }
+.episodes.open { display: block; }
+.ep-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.ep-btn {
+  border-radius: 8px;
+  padding: 6px;
+  font-size: 12px;
+  background: #e2e8f0;
+  color: #102a43;
+  border: 0;
+  cursor: pointer;
+}
+.actions { margin-top: 8px; display: grid; grid-template-columns: 1fr; gap: 6px; }
+@media (max-width: 700px) {
+  .search { grid-template-columns: 1fr; }
+}
+</style>
 </head>
 <body>
-  <div class=\"wrap\">
-    <h1>ani-cli Web</h1>
-    <p class=\"sub\">Search, download full season, and watch episodes. Server port: 9119.</p>
-    <div class=\"bar\">
-      <input id=\"query\" placeholder=\"Search anime title\" />
-      <select id=\"mode\"><option value=\"dub\" selected>dub</option><option value=\"sub\">sub</option></select>
-      <button id=\"searchBtn\">Search</button>
-    </div>
-    <div id=\"status\">Ready.</div>
-    <div id=\"results\" class=\"grid\"></div>
+<div class=\"wrap\">
+  <h1>ani-cli Browser Player</h1>
+  <p class=\"sub\">Click a poster to select episodes. Playing an episode downloads it first, then streams it in this page. Port 9119.</p>
+
+  <div class=\"search\">
+    <input id=\"query\" placeholder=\"Search anime\" />
+    <select id=\"mode\"><option value=\"dub\" selected>dub</option><option value=\"sub\">sub</option></select>
+    <button id=\"searchBtn\">Search</button>
   </div>
+
+  <div id=\"status\">Ready.</div>
+
+  <div class=\"player\">
+    <video id=\"video\" controls></video>
+    <div id=\"videoMeta\" class=\"meta\">No episode loaded.</div>
+  </div>
+
+  <div id=\"results\" class=\"grid\"></div>
+</div>
+
 <script>
 const queryEl = document.getElementById('query');
 const modeEl = document.getElementById('mode');
 const searchBtn = document.getElementById('searchBtn');
 const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
-
-function setStatus(msg) { statusEl.textContent = msg; }
+const videoEl = document.getElementById('video');
+const videoMetaEl = document.getElementById('videoMeta');
 
 function esc(s) {
-  return (s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#39;');
+  return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
+function setStatus(msg) { statusEl.textContent = msg; }
 
-async function action(payload) {
-  const resp = await fetch(payload.download ? '/api/download' : '/api/watch', {
+async function post(path, payload) {
+  const resp = await fetch(path, {
     method: 'POST',
-    headers: {'Content-Type': 'application/json'},
+    headers: {'Content-Type':'application/json'},
     body: JSON.stringify(payload),
   });
   const data = await resp.json();
   if (!resp.ok) throw new Error(data.error || 'request failed');
   return data;
+}
+
+function makeEpisodeButtons(container, item) {
+  const grid = container.querySelector('.ep-grid');
+  if (grid.childElementCount > 0) return;
+
+  for (let ep = 1; ep <= item.episodes; ep += 1) {
+    const btn = document.createElement('button');
+    btn.className = 'ep-btn';
+    btn.textContent = String(ep);
+    btn.onclick = async () => {
+      try {
+        setStatus(`Downloading ${item.name} episode ${ep}...`);
+        const res = await post('/api/play_episode', {
+          query: queryEl.value.trim(),
+          mode: modeEl.value,
+          index: item.index,
+          episode: ep,
+        });
+        videoEl.src = res.media_url;
+        videoMetaEl.textContent = `${item.name} - Episode ${ep} (${res.filename})`;
+        await videoEl.play().catch(() => {});
+        setStatus(`Now playing ${item.name} episode ${ep}`);
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+      }
+    };
+    grid.appendChild(btn);
+  }
 }
 
 function render(items) {
@@ -231,51 +373,59 @@ function render(items) {
     return;
   }
 
-  for (const it of items) {
+  for (const item of items) {
     const card = document.createElement('div');
     card.className = 'card';
-    const img = it.image_url ? esc(it.image_url) : 'https://placehold.co/600x900?text=No+Poster';
-    const title = esc(it.name);
+    const title = esc(item.name);
+    const imageUrl = item.image_url ? esc(item.image_url) : 'https://placehold.co/600x900?text=No+Poster';
+
     card.innerHTML = `
-      <img class="poster" src="${img}" alt="${title}">
+      <div class="poster-wrap" role="button" tabindex="0">
+        <img class="poster" src="${imageUrl}" alt="${title}" />
+        <div class="tap-hint">click poster: episodes</div>
+      </div>
       <div class="meta">
-        <div class="title">#${it.index} ${title}</div>
-        <div class="eps">${it.episodes} episodes</div>
-        <div class="row">
-          <button class="tiny btn2" data-kind="download">Download Season</button>
-          <div class="watch">
-            <input class="tiny" type="number" min="1" max="${it.episodes}" value="1" />
-            <button class="tiny" data-kind="watch">Watch Episode</button>
+        <div class="title">#${item.index} ${title}</div>
+        <div class="eps">${item.episodes} episodes</div>
+        <div class="episodes">
+          <div class="ep-grid"></div>
+          <div class="actions">
+            <button class="alt" data-season>Download Full Season</button>
           </div>
         </div>
       </div>`;
 
-    const btnDownload = card.querySelector('button[data-kind="download"]');
-    const btnWatch = card.querySelector('button[data-kind="watch"]');
-    const epInput = card.querySelector('input');
+    const posterWrap = card.querySelector('.poster-wrap');
+    const episodesPanel = card.querySelector('.episodes');
+    const seasonBtn = card.querySelector('[data-season]');
 
-    btnDownload.onclick = async () => {
-      try {
-        setStatus(`Starting season download: ${it.name}`);
-        const res = await action({query: queryEl.value.trim(), mode: modeEl.value, index: it.index, episodes: `1-${it.episodes}`, download: true});
-        setStatus(res.message);
-      } catch (e) {
-        setStatus(`Error: ${e.message}`);
+    const toggleEpisodes = () => {
+      episodesPanel.classList.toggle('open');
+      if (episodesPanel.classList.contains('open')) {
+        makeEpisodeButtons(episodesPanel, item);
       }
     };
 
-    btnWatch.onclick = async () => {
-      const ep = Number(epInput.value || '1');
-      if (ep < 1 || ep > it.episodes) {
-        setStatus(`Episode must be between 1 and ${it.episodes}`);
-        return;
+    posterWrap.onclick = toggleEpisodes;
+    posterWrap.onkeydown = (evt) => {
+      if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        toggleEpisodes();
       }
+    };
+
+    seasonBtn.onclick = async () => {
       try {
-        setStatus(`Starting watch: ${it.name} E${ep}`);
-        const res = await action({query: queryEl.value.trim(), mode: modeEl.value, index: it.index, episodes: `${ep}`, download: false});
+        setStatus(`Starting season download for ${item.name}...`);
+        const res = await post('/api/download_season', {
+          query: queryEl.value.trim(),
+          mode: modeEl.value,
+          index: item.index,
+          episodes: item.episodes,
+        });
         setStatus(res.message);
-      } catch (e) {
-        setStatus(`Error: ${e.message}`);
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
       }
     };
 
@@ -291,15 +441,16 @@ async function doSearch() {
   }
   setStatus('Searching...');
   resultsEl.innerHTML = '';
+
   try {
     const params = new URLSearchParams({q, mode: modeEl.value});
     const resp = await fetch('/api/search?' + params.toString());
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.error || 'search failed');
     render(data.results || []);
-    setStatus(`Found ${(data.results || []).length} result(s).`);
-  } catch (e) {
-    setStatus(`Error: ${e.message}`);
+    setStatus(`Found ${(data.results || []).length} result(s). Click a poster to pick episodes.`);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
   }
 }
 
@@ -328,10 +479,38 @@ class AniHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _serve_media(self, filename: str) -> None:
+        safe_name = Path(urllib.parse.unquote(filename)).name
+        target = (DOWNLOAD_DIR / safe_name).resolve()
+        if target.parent != DOWNLOAD_DIR.resolve() or not target.exists() or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "Media not found")
+            return
+
+        ctype, _ = mimetypes.guess_type(str(target))
+        if not ctype:
+            ctype = "application/octet-stream"
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(target.stat().st_size))
+        self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        with target.open("rb") as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+
         if parsed.path == "/":
             self._send_html(HTTPStatus.OK, PAGE_HTML)
+            return
+
+        if parsed.path.startswith("/media/"):
+            self._serve_media(parsed.path.replace("/media/", "", 1))
             return
 
         if parsed.path == "/api/search":
@@ -343,6 +522,7 @@ class AniHandler(BaseHTTPRequestHandler):
             if not query:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "missing q"})
                 return
+
             try:
                 results = search_anime(query, mode)
             except Exception as exc:
@@ -353,12 +533,12 @@ class AniHandler(BaseHTTPRequestHandler):
                 "results": [
                     {
                         "index": i,
-                        "id": item.id,
-                        "name": item.name,
-                        "episodes": item.episodes,
-                        "image_url": item.image_url,
+                        "id": r.id,
+                        "name": r.name,
+                        "episodes": r.episodes,
+                        "image_url": r.image_url,
                     }
-                    for i, item in enumerate(results, start=1)
+                    for i, r in enumerate(results, start=1)
                 ]
             }
             self._send_json(HTTPStatus.OK, payload)
@@ -368,23 +548,24 @@ class AniHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/download", "/api/watch"}:
+        if parsed.path not in {"/api/play_episode", "/api/download_season"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
 
         length = int(self.headers.get("Content-Length") or "0")
-        body = self.rfile.read(length)
+        raw = self.rfile.read(length)
         try:
-            payload = json.loads(body.decode("utf-8"))
+            payload = json.loads(raw.decode("utf-8"))
         except Exception:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
             return
 
         query = str(payload.get("query") or "").strip()
         mode = str(payload.get("mode") or "dub").strip()
-        episodes = str(payload.get("episodes") or "1").strip()
+        if mode not in {"dub", "sub"}:
+            mode = "dub"
         try:
-            search_index = int(payload.get("index"))
+            index = int(payload.get("index"))
         except Exception:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid index"})
             return
@@ -392,24 +573,50 @@ class AniHandler(BaseHTTPRequestHandler):
         if not query:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "query required"})
             return
-        if mode not in {"dub", "sub"}:
-            mode = "dub"
-        if search_index < 1:
+        if index < 1:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "index must be >= 1"})
             return
 
-        ok, msg = run_ani_cli(
-            query=query,
-            mode=mode,
-            search_index=search_index,
-            episode_range=episodes,
-            download=(parsed.path == "/api/download"),
-        )
-        if not ok:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+        if parsed.path == "/api/play_episode":
+            try:
+                episode = int(payload.get("episode"))
+            except Exception:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid episode"})
+                return
+            if episode < 1:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "episode must be >= 1"})
+                return
+
+            with DOWNLOAD_LOCK:
+                ok, msg, media_file = download_episode_for_browser(query, mode, index, episode)
+            if not ok or media_file is None:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+                return
+
+            media_name = media_file.name
+            media_url = "/media/" + urllib.parse.quote(media_name)
+            self._send_json(
+                HTTPStatus.OK,
+                {"message": msg, "filename": media_name, "media_url": media_url, "episode": episode},
+            )
             return
 
-        self._send_json(HTTPStatus.OK, {"message": msg})
+        if parsed.path == "/api/download_season":
+            try:
+                episodes = int(payload.get("episodes"))
+            except Exception:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid episodes"})
+                return
+            if episodes < 1:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "episodes must be >= 1"})
+                return
+
+            ok, msg = start_background_season_download(query, mode, index, episodes)
+            if not ok:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+                return
+            self._send_json(HTTPStatus.OK, {"message": msg})
+            return
 
 
 def parse_args() -> argparse.Namespace:
@@ -421,8 +628,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), AniHandler)
     print(f"Serving ani-cli web UI at http://{args.host}:{args.port}")
+    print(f"Download directory: {DOWNLOAD_DIR}")
+    server = ThreadingHTTPServer((args.host, args.port), AniHandler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
