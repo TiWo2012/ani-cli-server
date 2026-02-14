@@ -12,7 +12,8 @@ Web app for `ani-cli` on port `9119`.
 - In library season tabs, episodes not downloaded yet are shown in grey
 - Click an episode to **download first**, then play it in a **popup video player**
 - Optional full-season download button
-- Keeps local watch/download history in `history.json`
+- Bottom history panel is toggleable and keeps only the latest 10 items (no timestamps shown)
+- Shows a loading spinner during search/download actions
 
 ## Run
 

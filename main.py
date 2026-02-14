@@ -64,7 +64,9 @@ def load_history() -> list[dict]:
         data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
-    return data if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    return data[-10:]
 
 
 def save_history(items: list[dict]) -> None:
@@ -75,34 +77,33 @@ def append_history(event: str, details: dict) -> None:
     with HISTORY_LOCK:
         items = load_history()
         items.append({"time": utc_now_iso(), "event": event, "details": details})
-        items = items[-300:]
+        items = items[-10:]
         save_history(items)
 
 
-def latest_history(limit: int = 25) -> list[dict]:
+def latest_history(limit: int = 10) -> list[dict]:
     with HISTORY_LOCK:
         items = load_history()
     return list(reversed(items[-limit:]))
 
 
-def history_summaries(limit: int = 25) -> list[dict]:
+def history_summaries(limit: int = 10) -> list[dict]:
     items = latest_history(limit=limit)
     output: list[dict] = []
     for item in items:
         event = str(item.get("event") or "event")
         details = item.get("details") or {}
-        when = str(item.get("time") or "")
         anime = str(details.get("anime") or details.get("query") or "")
         episode = details.get("episode")
         if event == "play_episode":
-            summary = f"{when} · played {anime} episode {episode}"
+            summary = f"Played {anime} episode {episode}"
         elif event == "play_downloaded_file":
-            summary = f"{when} · played downloaded {anime or details.get('filename')}"
+            summary = f"Played downloaded {anime or details.get('filename')}"
         elif event == "download_season":
-            summary = f"{when} · started season download for {anime}"
+            summary = f"Started season download for {anime}"
         else:
-            summary = f"{when} · {event}"
-        output.append({"time": when, "event": event, "summary": summary, "details": details})
+            summary = event.replace("_", " ").capitalize()
+        output.append({"event": event, "summary": summary, "details": details})
     return output
 
 
@@ -415,6 +416,7 @@ body {
 .wrap { max-width: 1300px; margin: 0 auto; padding: 20px; }
 h1 { margin: 0 0 8px; }
 .sub { margin: 0 0 16px; color: #dbe7f3; }
+.wrap > * { animation: fadeInUp .35s ease both; }
 .search {
   display: grid;
   grid-template-columns: 1fr auto auto;
@@ -433,21 +435,50 @@ button {
   color: #fff;
   font-weight: 700;
   background: linear-gradient(90deg, var(--primary), var(--primary2));
+  transition: transform .18s ease, filter .18s ease, box-shadow .18s ease;
 }
 button.alt { background: linear-gradient(90deg, #1d3557, #457b9d); }
 button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
-#status { min-height: 22px; margin-bottom: 10px; color: #dbe7f3; }
+button:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: 0 8px 18px rgba(0,0,0,.25); }
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+#status { min-height: 22px; color: #dbe7f3; }
+.spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 2px solid rgba(219, 231, 243, 0.35);
+  border-top-color: #fff;
+  animation: spin .8s linear infinite;
+  display: none;
+}
+.spinner.show { display: inline-block; }
 .history-box {
   background: rgba(5, 12, 24, 0.55);
   border: 1px solid rgba(203, 213, 225, 0.18);
   border-radius: 12px;
   padding: 10px 12px;
-  margin-bottom: 12px;
+  margin-top: 14px;
+  animation: fadeInUp .4s ease both;
+}
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0 0 8px;
 }
 .history-box h3 {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 14px;
   color: #dbe7f3;
+}
+.history-toggle {
+  padding: 6px 10px;
+  font-size: 12px;
 }
 #historyList {
   margin: 0;
@@ -456,8 +487,10 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   overflow: auto;
   color: #dbe7f3;
   font-size: 13px;
+  transition: max-height .25s ease, opacity .25s ease;
 }
 #historyList li { margin-bottom: 4px; }
+.history-box.collapsed #historyList { max-height: 0; opacity: 0; overflow: hidden; padding-left: 0; }
 .season-tab {
   display: none;
   grid-template-columns: 170px 1fr;
@@ -468,8 +501,11 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   padding: 12px;
   margin-bottom: 16px;
   box-shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
+  transform: translateY(8px);
+  opacity: 0;
+  transition: transform .22s ease, opacity .22s ease;
 }
-.season-tab.open { display: grid; }
+.season-tab.open { display: grid; transform: translateY(0); opacity: 1; }
 .season-tab img {
   width: 100%;
   border-radius: 10px;
@@ -504,9 +540,13 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 8px 30px rgba(0,0,0,.28);
+  transition: transform .2s ease, box-shadow .2s ease;
+  animation: fadeInUp .4s ease both;
 }
+.card:hover { transform: translateY(-3px); box-shadow: 0 14px 28px rgba(0,0,0,.3); }
 .poster-wrap { position: relative; cursor: pointer; }
-.poster { width: 100%; height: 320px; object-fit: cover; display: block; background: #dde7f0; }
+.poster { width: 100%; height: 320px; object-fit: cover; display: block; background: #dde7f0; transition: transform .25s ease, filter .25s ease; }
+.poster-wrap:hover .poster { transform: scale(1.02); filter: saturate(1.08); }
 .tap-hint {
   position: absolute;
   left: 8px;
@@ -528,7 +568,9 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   color: #102a43;
   border: 0;
   cursor: pointer;
+  transition: transform .14s ease, filter .14s ease;
 }
+.ep-btn:hover { transform: translateY(-1px); filter: brightness(1.05); }
 .ep-btn.downloaded {
   background: #d1fae5;
   color: #065f46;
@@ -555,6 +597,7 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   border-radius: 12px;
   overflow: hidden;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  animation: popIn .22s ease;
 }
 .modal-top {
   display: grid;
@@ -576,6 +619,15 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   font-size: 16px;
   color: #e2e8f0;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes popIn {
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
+}
 @media (max-width: 700px) {
   .search { grid-template-columns: 1fr; }
   .season-tab { grid-template-columns: 1fr; }
@@ -594,10 +646,9 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
     <button id=\"searchBtn\">Search</button>
   </div>
 
-  <div id=\"status\">Ready.</div>
-  <div class=\"history-box\">
-    <h3>History</h3>
-    <ol id=\"historyList\"></ol>
+  <div class=\"status-row\">
+    <div id=\"status\">Ready.</div>
+    <div id=\"spinner\" class=\"spinner\"></div>
   </div>
 
   <div id=\"seasonTab\" class=\"season-tab\">
@@ -617,6 +668,14 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 
   <h2 id=\"viewTitle\" class=\"view-title\">Downloaded Library</h2>
   <div id=\"results\" class=\"grid\"></div>
+
+  <div id=\"historyBox\" class=\"history-box collapsed\">
+    <div class=\"history-head\">
+      <h3>History (last 10)</h3>
+      <button id=\"historyToggle\" class=\"history-toggle alt\">Show</button>
+    </div>
+    <ol id=\"historyList\"></ol>
+  </div>
 </div>
 
 <div id=\"playerModal\" class=\"modal\">
@@ -634,6 +693,9 @@ const queryEl = document.getElementById('query');
 const modeEl = document.getElementById('mode');
 const searchBtn = document.getElementById('searchBtn');
 const statusEl = document.getElementById('status');
+const spinnerEl = document.getElementById('spinner');
+const historyBoxEl = document.getElementById('historyBox');
+const historyToggleEl = document.getElementById('historyToggle');
 const historyListEl = document.getElementById('historyList');
 const viewTitleEl = document.getElementById('viewTitle');
 const resultsEl = document.getElementById('results');
@@ -654,6 +716,10 @@ function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 function setStatus(msg) { statusEl.textContent = msg; }
+function setLoading(on, msg = '') {
+  if (msg) setStatus(msg);
+  spinnerEl.classList.toggle('show', Boolean(on));
+}
 
 function renderHistory(items) {
   historyListEl.innerHTML = '';
@@ -734,7 +800,7 @@ function buildSeasonTab(item, opts = {}) {
     } else {
       btn.onclick = async () => {
         try {
-          setStatus(`Downloading ${title} episode ${ep}...`);
+          setLoading(true, `Downloading ${title} episode ${ep}...`);
           const res = await post('/api/play_episode', {
             query: queryEl.value.trim(),
             mode: modeEl.value,
@@ -749,6 +815,8 @@ function buildSeasonTab(item, opts = {}) {
           loadLibrary();
         } catch (err) {
           setStatus(`Error: ${err.message}`);
+        } finally {
+          setLoading(false);
         }
       };
     }
@@ -849,7 +917,7 @@ function renderLibrary(items) {
 seasonDownloadEl.onclick = async () => {
   if (!selectedSeason) return;
   try {
-    setStatus(`Starting season download for ${selectedSeason.name}...`);
+    setLoading(true, `Starting season download for ${selectedSeason.name}...`);
     const res = await post('/api/download_season', {
       query: queryEl.value.trim(),
       mode: modeEl.value,
@@ -862,6 +930,8 @@ seasonDownloadEl.onclick = async () => {
     loadHistory();
   } catch (err) {
     setStatus(`Error: ${err.message}`);
+  } finally {
+    setLoading(false);
   }
 };
 
@@ -874,6 +944,10 @@ modalCloseEl.onclick = closePopupPlayer;
 playerModalEl.onclick = (evt) => {
   if (evt.target === playerModalEl) closePopupPlayer();
 };
+historyToggleEl.onclick = () => {
+  const collapsed = historyBoxEl.classList.toggle('collapsed');
+  historyToggleEl.textContent = collapsed ? 'Show' : 'Hide';
+};
 
 async function doSearch() {
   const q = queryEl.value.trim();
@@ -882,7 +956,7 @@ async function doSearch() {
     await loadHistory();
     return;
   }
-  setStatus('Searching...');
+  setLoading(true, 'Searching...');
   resultsEl.innerHTML = '';
 
   try {
@@ -894,11 +968,13 @@ async function doSearch() {
     setStatus(`Found ${(data.results || []).length} result(s). Click a poster to pick episodes.`);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
+  } finally {
+    setLoading(false);
   }
 }
 
 async function loadLibrary() {
-  setStatus('Loading downloaded library...');
+  setLoading(true, 'Loading downloaded library...');
   try {
     const resp = await fetch('/api/library');
     const data = await resp.json();
@@ -907,6 +983,8 @@ async function loadLibrary() {
     setStatus(`Loaded ${(data.items || []).length} downloaded file(s).`);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
+  } finally {
+    setLoading(false);
   }
 }
 
@@ -1050,7 +1128,7 @@ class AniHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/history":
-            self._send_json(HTTPStatus.OK, {"items": history_summaries(limit=30)})
+            self._send_json(HTTPStatus.OK, {"items": history_summaries(limit=10)})
             return
 
         self._send_html(HTTPStatus.NOT_FOUND, "<h1>Not found</h1>")
