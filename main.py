@@ -1319,7 +1319,7 @@ class AniHandler(BaseHTTPRequestHandler):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ani-cli web UI")
-    parser.add_argument("--host", default="127.0.0.1", help="bind host")
+    parser.add_argument("--host", default="0.0.0.0", help="bind host")
     parser.add_argument("--port", type=int, default=9119, help="bind port (default: 9119)")
     return parser.parse_args()
 

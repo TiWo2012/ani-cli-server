@@ -26,7 +26,7 @@ python3 main.py
 Open:
 
 ```text
-http://127.0.0.1:9119
+http://<your-host-ip>:9119
 ```
 
 ## Requirements
