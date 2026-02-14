@@ -5,8 +5,8 @@ Web app for `ani-cli` on port `9119`.
 ## What it does
 
 - Search anime (`dub` default, optional `sub`)
-- Click a poster to open episode selection
-- Click an episode to **download first**, then play it **inside the browser**
+- Click a poster to open a season tab with episode buttons
+- Click an episode to **download first**, then play it in a **popup video player**
 - Optional full-season download button
 
 ## Run

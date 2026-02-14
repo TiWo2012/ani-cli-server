@@ -230,15 +230,41 @@ button {
 button.alt { background: linear-gradient(90deg, #1d3557, #457b9d); }
 button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 #status { min-height: 22px; margin-bottom: 10px; color: #dbe7f3; }
-.player {
-  background: #000;
+.season-tab {
+  display: none;
+  grid-template-columns: 170px 1fr;
+  gap: 14px;
+  background: #f8fafc;
   border-radius: 12px;
-  overflow: hidden;
+  color: #0f172a;
+  padding: 12px;
   margin-bottom: 16px;
   box-shadow: 0 12px 35px rgba(0, 0, 0, 0.35);
 }
-.player video { width: 100%; max-height: 56vh; display: block; background: #000; }
-.player .meta { padding: 8px 10px; font-size: 14px; color: #cbd5e1; background: #0b1220; }
+.season-tab.open { display: grid; }
+.season-tab img {
+  width: 100%;
+  border-radius: 10px;
+  height: 240px;
+  object-fit: cover;
+  background: #dde7f0;
+}
+.season-tab .head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.season-tab .head strong { font-size: 18px; }
+.season-tab .count { color: #486581; font-size: 14px; }
+.season-tab .ep-grid {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 6px;
+  max-height: 190px;
+  overflow: auto;
+  margin-top: 8px;
+}
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -265,17 +291,7 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 }
 .meta { padding: 10px; }
 .title { font-size: 14px; font-weight: 700; line-height: 1.35; min-height: 38px; margin-bottom: 4px; }
-.eps { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-.episodes { display: none; margin-top: 8px; }
-.episodes.open { display: block; }
-.ep-grid {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 6px;
-  max-height: 180px;
-  overflow: auto;
-  padding-right: 2px;
-}
+.eps { color: var(--muted); font-size: 13px; margin-bottom: 0; }
 .ep-btn {
   border-radius: 8px;
   padding: 6px;
@@ -285,16 +301,50 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   border: 0;
   cursor: pointer;
 }
-.actions { margin-top: 8px; display: grid; grid-template-columns: 1fr; gap: 6px; }
+.actions { margin-top: 10px; display: grid; grid-template-columns: 1fr; gap: 6px; }
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 10, 20, 0.8);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+.modal.open { display: flex; }
+.modal-panel {
+  width: min(96vw, 980px);
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+.modal-top {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  background: #0b1220;
+  color: #dbe7f3;
+  padding: 8px 10px;
+}
+.modal video {
+  width: 100%;
+  max-height: 78vh;
+  background: #000;
+  display: block;
+}
+.close-btn { padding: 8px 12px; }
 @media (max-width: 700px) {
   .search { grid-template-columns: 1fr; }
+  .season-tab { grid-template-columns: 1fr; }
+  .season-tab .ep-grid { grid-template-columns: repeat(7, minmax(0, 1fr)); }
 }
 </style>
 </head>
 <body>
 <div class=\"wrap\">
   <h1>ani-cli Browser Player</h1>
-  <p class=\"sub\">Click a poster to select episodes. Playing an episode downloads it first, then streams it in this page. Port 9119.</p>
+  <p class=\"sub\">Click any poster to open a season tab. Select an episode to download then play in a popup. Port 9119.</p>
 
   <div class=\"search\">
     <input id=\"query\" placeholder=\"Search anime\" />
@@ -304,12 +354,32 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 
   <div id=\"status\">Ready.</div>
 
-  <div class=\"player\">
-    <video id=\"video\" controls></video>
-    <div id=\"videoMeta\" class=\"meta\">No episode loaded.</div>
+  <div id=\"seasonTab\" class=\"season-tab\">
+    <img id=\"seasonPoster\" alt=\"season poster\" />
+    <div>
+      <div class=\"head\">
+        <strong id=\"seasonTitle\">Season</strong>
+        <button id=\"seasonClose\" class=\"alt\">Close</button>
+      </div>
+      <div id=\"seasonCount\" class=\"count\"></div>
+      <div id=\"seasonEpisodes\" class=\"ep-grid\"></div>
+      <div class=\"actions\">
+        <button id=\"seasonDownload\" class=\"ok\">Download Full Season</button>
+      </div>
+    </div>
   </div>
 
   <div id=\"results\" class=\"grid\"></div>
+</div>
+
+<div id=\"playerModal\" class=\"modal\">
+  <div class=\"modal-panel\">
+    <div class=\"modal-top\">
+      <div id=\"videoMeta\">No episode loaded.</div>
+      <button id=\"modalClose\" class=\"close-btn alt\">Close</button>
+    </div>
+    <video id=\"video\" controls></video>
+  </div>
 </div>
 
 <script>
@@ -320,6 +390,16 @@ const statusEl = document.getElementById('status');
 const resultsEl = document.getElementById('results');
 const videoEl = document.getElementById('video');
 const videoMetaEl = document.getElementById('videoMeta');
+const seasonTabEl = document.getElementById('seasonTab');
+const seasonPosterEl = document.getElementById('seasonPoster');
+const seasonTitleEl = document.getElementById('seasonTitle');
+const seasonCountEl = document.getElementById('seasonCount');
+const seasonEpisodesEl = document.getElementById('seasonEpisodes');
+const seasonDownloadEl = document.getElementById('seasonDownload');
+const seasonCloseEl = document.getElementById('seasonClose');
+const playerModalEl = document.getElementById('playerModal');
+const modalCloseEl = document.getElementById('modalClose');
+let selectedSeason = null;
 
 function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
@@ -337,10 +417,24 @@ async function post(path, payload) {
   return data;
 }
 
-function makeEpisodeButtons(container, item) {
-  const grid = container.querySelector('.ep-grid');
-  if (grid.childElementCount > 0) return;
+function openPopupPlayer(mediaUrl, metaText) {
+  videoEl.src = mediaUrl;
+  videoMetaEl.textContent = metaText;
+  playerModalEl.classList.add('open');
+  videoEl.play().catch(() => {});
+}
 
+function closePopupPlayer() {
+  playerModalEl.classList.remove('open');
+  videoEl.pause();
+}
+
+function buildSeasonTab(item) {
+  selectedSeason = item;
+  seasonPosterEl.src = item.image_url || 'https://placehold.co/600x900?text=No+Poster';
+  seasonTitleEl.textContent = `#${item.index} ${item.name}`;
+  seasonCountEl.textContent = `${item.episodes} episodes`;
+  seasonEpisodesEl.innerHTML = '';
   for (let ep = 1; ep <= item.episodes; ep += 1) {
     const btn = document.createElement('button');
     btn.className = 'ep-btn';
@@ -354,19 +448,20 @@ function makeEpisodeButtons(container, item) {
           index: item.index,
           episode: ep,
         });
-        videoEl.src = res.media_url;
-        videoMetaEl.textContent = `${item.name} - Episode ${ep} (${res.filename})`;
-        await videoEl.play().catch(() => {});
+        openPopupPlayer(res.media_url, `${item.name} - Episode ${ep} (${res.filename})`);
         setStatus(`Now playing ${item.name} episode ${ep}`);
       } catch (err) {
         setStatus(`Error: ${err.message}`);
       }
     };
-    grid.appendChild(btn);
+    seasonEpisodesEl.appendChild(btn);
   }
+  seasonTabEl.classList.add('open');
 }
 
 function render(items) {
+  selectedSeason = null;
+  seasonTabEl.classList.remove('open');
   resultsEl.innerHTML = '';
   if (!items.length) {
     resultsEl.innerHTML = '<div>No results.</div>';
@@ -382,56 +477,51 @@ function render(items) {
     card.innerHTML = `
       <div class="poster-wrap" role="button" tabindex="0">
         <img class="poster" src="${imageUrl}" alt="${title}" />
-        <div class="tap-hint">click poster: episodes</div>
+        <div class="tap-hint">open season tab</div>
       </div>
       <div class="meta">
         <div class="title">#${item.index} ${title}</div>
         <div class="eps">${item.episodes} episodes</div>
-        <div class="episodes">
-          <div class="ep-grid"></div>
-          <div class="actions">
-            <button class="alt" data-season>Download Full Season</button>
-          </div>
-        </div>
       </div>`;
 
     const posterWrap = card.querySelector('.poster-wrap');
-    const episodesPanel = card.querySelector('.episodes');
-    const seasonBtn = card.querySelector('[data-season]');
-
-    const toggleEpisodes = () => {
-      episodesPanel.classList.toggle('open');
-      if (episodesPanel.classList.contains('open')) {
-        makeEpisodeButtons(episodesPanel, item);
-      }
-    };
-
-    posterWrap.onclick = toggleEpisodes;
+    posterWrap.onclick = () => buildSeasonTab(item);
     posterWrap.onkeydown = (evt) => {
       if (evt.key === 'Enter' || evt.key === ' ') {
         evt.preventDefault();
-        toggleEpisodes();
-      }
-    };
-
-    seasonBtn.onclick = async () => {
-      try {
-        setStatus(`Starting season download for ${item.name}...`);
-        const res = await post('/api/download_season', {
-          query: queryEl.value.trim(),
-          mode: modeEl.value,
-          index: item.index,
-          episodes: item.episodes,
-        });
-        setStatus(res.message);
-      } catch (err) {
-        setStatus(`Error: ${err.message}`);
+        buildSeasonTab(item);
       }
     };
 
     resultsEl.appendChild(card);
   }
 }
+
+seasonDownloadEl.onclick = async () => {
+  if (!selectedSeason) return;
+  try {
+    setStatus(`Starting season download for ${selectedSeason.name}...`);
+    const res = await post('/api/download_season', {
+      query: queryEl.value.trim(),
+      mode: modeEl.value,
+      index: selectedSeason.index,
+      episodes: selectedSeason.episodes,
+    });
+    setStatus(res.message);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+};
+
+seasonCloseEl.onclick = () => {
+  seasonTabEl.classList.remove('open');
+  selectedSeason = null;
+};
+
+modalCloseEl.onclick = closePopupPlayer;
+playerModalEl.onclick = (evt) => {
+  if (evt.target === playerModalEl) closePopupPlayer();
+};
 
 async function doSearch() {
   const q = queryEl.value.trim();
