@@ -98,6 +98,8 @@ class AniCliUI:
         self.query_var = tk.StringVar()
         self.mode_var = tk.StringVar(value="sub")
         self.status_var = tk.StringVar(value="Ready")
+        self.episode_var = tk.IntVar(value=1)
+        self.episode_info_var = tk.StringVar(value="Select a result")
 
         self._build_layout()
         self.root.after(100, self._process_queue)
@@ -142,6 +144,7 @@ class AniCliUI:
         self.tree.column("title", width=720)
         self.tree.column("episodes", width=120, anchor=tk.CENTER, stretch=False)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", lambda _: self.watch_selected())
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -158,6 +161,18 @@ class AniCliUI:
             state=tk.DISABLED,
         )
         self.watch_btn.pack(side=tk.LEFT)
+
+        ttk.Label(controls, text="Episode:").pack(side=tk.LEFT, padx=(12, 4))
+        self.episode_spinbox = ttk.Spinbox(
+            controls,
+            from_=1,
+            to=1,
+            textvariable=self.episode_var,
+            width=7,
+            state=tk.DISABLED,
+        )
+        self.episode_spinbox.pack(side=tk.LEFT)
+        ttk.Label(controls, textvariable=self.episode_info_var).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(controls, textvariable=self.status_var).pack(side=tk.RIGHT)
 
@@ -214,7 +229,29 @@ class AniCliUI:
             self.tree.insert("", tk.END, iid=str(i), values=(i, result.name, result.episodes))
 
         self.watch_btn.configure(state=tk.NORMAL if results else tk.DISABLED)
+        self._set_episode_limit(None)
         self.status_var.set(f"Found {len(results)} result(s)")
+
+    def _on_tree_select(self, _: object) -> None:
+        selected = self.tree.selection()
+        if not selected:
+            self._set_episode_limit(None)
+            return
+
+        idx = int(selected[0])
+        result = self.results[idx - 1]
+        self._set_episode_limit(result.episodes)
+
+    def _set_episode_limit(self, max_episode: int | None) -> None:
+        if max_episode is None or max_episode < 1:
+            self.episode_var.set(1)
+            self.episode_spinbox.configure(state=tk.DISABLED, from_=1, to=1)
+            self.episode_info_var.set("Select a result")
+            return
+
+        self.episode_var.set(1)
+        self.episode_spinbox.configure(state="normal", from_=1, to=max_episode)
+        self.episode_info_var.set(f"1..{max_episode}")
 
     def watch_selected(self) -> None:
         if not self.results:
@@ -226,15 +263,20 @@ class AniCliUI:
             return
 
         idx = int(selected[0])
+        result = self.results[idx - 1]
         query = self.query_var.get().strip()
         mode = self.mode_var.get().strip() or "sub"
+        episode = self.episode_var.get()
+        if episode < 1 or episode > result.episodes:
+            messagebox.showerror("Episode", f"Pick an episode between 1 and {result.episodes}.")
+            return
 
-        cmd = ["ani-cli", "-S", str(idx)]
+        cmd = ["ani-cli", "-S", str(idx), "-e", str(episode)]
         if mode == "dub":
             cmd.append("--dub")
         cmd.append(query)
 
-        self.status_var.set(f"Launching ani-cli for result #{idx}...")
+        self.status_var.set(f"Launching {result.name} episode {episode}...")
         try:
             subprocess.Popen(cmd)
         except FileNotFoundError:
@@ -246,7 +288,7 @@ class AniCliUI:
             self.status_var.set("Launch failed")
             return
 
-        self.status_var.set("ani-cli launched")
+        self.status_var.set(f"ani-cli launched: episode {episode}")
 
 
 def parse_args() -> argparse.Namespace:
