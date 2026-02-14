@@ -145,7 +145,7 @@ class AniCliUI:
         self.tree.column("episodes", width=120, anchor=tk.CENTER, stretch=False)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-        self.tree.bind("<Double-1>", lambda _: self.watch_selected())
+        self.tree.bind("<Double-1>", lambda _: self.download_selected())
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -156,8 +156,8 @@ class AniCliUI:
 
         self.watch_btn = ttk.Button(
             controls,
-            text="Watch Selected",
-            command=self.watch_selected,
+            text="Download Selected",
+            command=self.download_selected,
             state=tk.DISABLED,
         )
         self.watch_btn.pack(side=tk.LEFT)
@@ -253,13 +253,13 @@ class AniCliUI:
         self.episode_spinbox.configure(state="normal", from_=1, to=max_episode)
         self.episode_info_var.set(f"1..{max_episode}")
 
-    def watch_selected(self) -> None:
+    def download_selected(self) -> None:
         if not self.results:
             return
 
         selected = self.tree.selection()
         if not selected:
-            messagebox.showinfo("Watch", "Select an anime first.")
+            messagebox.showinfo("Download", "Select an anime first.")
             return
 
         idx = int(selected[0])
@@ -271,24 +271,24 @@ class AniCliUI:
             messagebox.showerror("Episode", f"Pick an episode between 1 and {result.episodes}.")
             return
 
-        cmd = ["ani-cli", "-S", str(idx), "-e", str(episode)]
+        cmd = ["ani-cli", "-d", "-S", str(idx), "-e", str(episode)]
         if mode == "dub":
             cmd.append("--dub")
         cmd.append(query)
 
-        self.status_var.set(f"Launching {result.name} episode {episode}...")
+        self.status_var.set(f"Starting download: {result.name} episode {episode}...")
         try:
             subprocess.Popen(cmd)
         except FileNotFoundError:
             messagebox.showerror("ani-cli missing", "ani-cli is not installed or not in PATH.")
-            self.status_var.set("Launch failed: ani-cli not found")
+            self.status_var.set("Download failed: ani-cli not found")
             return
         except Exception as exc:  # pragma: no cover - GUI surface
-            messagebox.showerror("Launch failed", str(exc))
-            self.status_var.set("Launch failed")
+            messagebox.showerror("Download failed", str(exc))
+            self.status_var.set("Download failed")
             return
 
-        self.status_var.set(f"ani-cli launched: episode {episode}")
+        self.status_var.set(f"Download started: episode {episode}")
 
 
 def parse_args() -> argparse.Namespace:

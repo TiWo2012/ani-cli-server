@@ -1,8 +1,8 @@
 # ani-cli-ui
 
-Python `tkinter` UI for searching anime using the same backend as `ani-cli`, with a watch action that launches `ani-cli` for the selected result.
+Python `tkinter` UI for searching anime using the same backend as `ani-cli`, with a download action that launches `ani-cli --download` for the selected result.
 
-You can select the exact episode in the UI before launching playback.
+You can select the exact episode in the UI before starting the download.
 
 ## Run
 
