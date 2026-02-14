@@ -8,7 +8,7 @@ Web app for `ani-cli` on port `9119`.
 - Launch with no search query to browse downloaded library immediately
 - Click a poster to open a season tab with episode buttons
 - Library view is grouped by anime title
-- Home/library cards include a direct **Download All** button
+- **Download All** appears in the opened show season panel
 - Posters are downloaded locally and reused from `posters/`
 - In library season tabs, episodes not downloaded yet are shown in grey
 - Click an episode to **download first**, then play it in a **popup video player**

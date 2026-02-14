@@ -592,7 +592,6 @@ button:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow
 .meta { padding: 10px; }
 .title { font-size: 14px; font-weight: 700; line-height: 1.35; min-height: 38px; margin-bottom: 4px; }
 .eps { color: var(--muted); font-size: 13px; margin-bottom: 0; }
-.card-actions { margin-top: 8px; }
 .ep-btn {
   border-radius: 8px;
   padding: 6px;
@@ -802,7 +801,7 @@ function buildSeasonTab(item, opts = {}) {
   seasonTitleEl.textContent = isLibrary ? title : `#${item.index} ${title}`;
   if (isLibrary) {
     seasonCountEl.textContent = `${downloadedEpisodes.size}/${totalEpisodes} downloaded`;
-    seasonDownloadEl.style.display = 'none';
+    seasonDownloadEl.style.display = '';
   } else {
     seasonCountEl.textContent = `${totalEpisodes} episodes`;
     seasonDownloadEl.style.display = '';
@@ -920,9 +919,6 @@ function renderLibrary(items) {
       <div class="meta">
         <div class="title">${title}</div>
         <div class="eps">${item.downloaded_count}/${item.total_episodes} downloaded</div>
-        <div class="card-actions">
-          <button class="ok" data-download-all>Download All</button>
-        </div>
       </div>`;
 
     const openLibrarySeason = () => {
@@ -938,7 +934,6 @@ function renderLibrary(items) {
     };
 
     const posterWrap = card.querySelector('.poster-wrap');
-    const downloadAllBtn = card.querySelector('[data-download-all]');
     posterWrap.onclick = openLibrarySeason;
     posterWrap.onkeydown = (evt) => {
       if (evt.key === 'Enter' || evt.key === ' ') {
@@ -946,23 +941,6 @@ function renderLibrary(items) {
         openLibrarySeason();
       }
     };
-    downloadAllBtn.onclick = async () => {
-      try {
-        setLoading(true, `Starting download-all for ${item.title}...`);
-        const res = await post('/api/download_all_by_title', {
-          title: item.title,
-          mode: modeEl.value,
-          image_url: item.poster_url || '',
-        });
-        setStatus(res.message);
-        loadHistory();
-      } catch (err) {
-        setStatus(`Error: ${err.message}`);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     resultsEl.appendChild(card);
   }
 }
@@ -970,15 +948,26 @@ function renderLibrary(items) {
 seasonDownloadEl.onclick = async () => {
   if (!selectedSeason) return;
   try {
-    setLoading(true, `Starting season download for ${selectedSeason.name}...`);
-    const res = await post('/api/download_season', {
-      query: queryEl.value.trim(),
-      mode: modeEl.value,
-      index: selectedSeason.index,
-      episodes: selectedSeason.episodes,
-      anime: selectedSeason.name,
-      image_url: selectedSeason.image_url || '',
-    });
+    const isLibrary = !selectedSeason.index;
+    const seasonTitle = selectedSeason.name || selectedSeason.title;
+    setLoading(true, `Starting season download for ${seasonTitle}...`);
+    let res;
+    if (isLibrary) {
+      res = await post('/api/download_all_by_title', {
+        title: selectedSeason.title,
+        mode: modeEl.value,
+        image_url: selectedSeason.poster_url || '',
+      });
+    } else {
+      res = await post('/api/download_season', {
+        query: queryEl.value.trim(),
+        mode: modeEl.value,
+        index: selectedSeason.index,
+        episodes: selectedSeason.episodes,
+        anime: selectedSeason.name,
+        image_url: selectedSeason.image_url || '',
+      });
+    }
     setStatus(res.message);
     loadHistory();
   } catch (err) {
