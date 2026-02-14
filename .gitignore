@@ -3,3 +3,5 @@ __pycache__/
 *.mp4
 *.vtt
 downloads/
+posters/
+history.json

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import json
 import mimetypes
 import os
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -35,9 +37,12 @@ SEARCH_QUERY = (
 
 DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+POSTER_DIR = Path(__file__).resolve().parent / "posters"
+POSTER_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_LOCK = threading.Lock()
 HISTORY_FILE = Path(__file__).resolve().parent / "history.json"
 HISTORY_LOCK = threading.Lock()
+EPISODE_NAME_RE = re.compile(r"^(?P<title>.+?)\s+Episode\s+(?P<ep>\d+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -159,6 +164,83 @@ def find_cover_image(title: str) -> str:
     return (((entries[0].get("images") or {}).get("jpg") or {}).get("image_url")) or ""
 
 
+def normalize_title(title: str) -> str:
+    return re.sub(r"\s+", " ", title.strip().lower())
+
+
+def best_search_match(query: str, results: list[AnimeResult]) -> AnimeResult | None:
+    if not results:
+        return None
+    wanted = normalize_title(query)
+    for item in results:
+        if normalize_title(item.name) == wanted:
+            return item
+    for item in results:
+        name = normalize_title(item.name)
+        if wanted in name or name in wanted:
+            return item
+    return results[0]
+
+
+def infer_total_episodes(title: str) -> int:
+    cached = 0
+    with HISTORY_LOCK:
+        for item in load_history():
+            details = item.get("details") or {}
+            anime = str(details.get("anime") or "")
+            episodes = int(details.get("episodes") or 0)
+            if normalize_title(anime) == normalize_title(title) and episodes > cached:
+                cached = episodes
+    if cached > 0:
+        return cached
+
+    for mode in ("dub", "sub"):
+        try:
+            results = search_anime(title, mode=mode)
+        except Exception:
+            continue
+        match = best_search_match(title, results)
+        if match is not None:
+            return match.episodes
+    return 0
+
+
+def ext_for_content_type(content_type: str) -> str:
+    if "png" in content_type:
+        return ".png"
+    if "webp" in content_type:
+        return ".webp"
+    return ".jpg"
+
+
+def ensure_local_poster(title: str, image_url: str = "") -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", title.strip().lower()).strip("-") or "poster"
+    base = f"{slug}-{hashlib.sha1(title.encode('utf-8')).hexdigest()[:8]}"
+
+    existing = next(POSTER_DIR.glob(f"{base}.*"), None)
+    if existing is not None and existing.is_file():
+        return "/poster/" + urllib.parse.quote(existing.name)
+
+    src = image_url or find_cover_image(title)
+    if not src:
+        return ""
+
+    try:
+        req = urllib.request.Request(src, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = resp.read()
+            ext = ext_for_content_type((resp.headers.get("Content-Type") or "").lower())
+    except Exception:
+        return ""
+
+    target = POSTER_DIR / f"{base}{ext}"
+    try:
+        target.write_bytes(data)
+    except Exception:
+        return ""
+    return "/poster/" + urllib.parse.quote(target.name)
+
+
 def build_ani_cmd(query: str, mode: str, search_index: int, episode_expr: str, download: bool) -> list[str]:
     cmd = ["ani-cli", "-S", str(search_index), "-e", episode_expr]
     if download:
@@ -233,36 +315,73 @@ def start_background_season_download(query: str, mode: str, search_index: int, e
     return True, f"Started full season download (1-{episodes})"
 
 
-def list_library_items() -> list[dict]:
+def list_library_groups() -> list[dict]:
     history_items = latest_history(limit=300)
-    meta_by_file: dict[str, dict] = {}
+    poster_by_title: dict[str, str] = {}
+    image_by_title: dict[str, str] = {}
     for entry in history_items:
         details = entry.get("details") or {}
-        filename = details.get("filename")
-        if isinstance(filename, str) and filename and filename not in meta_by_file:
-            meta_by_file[filename] = details
+        anime = str(details.get("anime") or "").strip()
+        image_url = str(details.get("image_url") or "").strip()
+        poster_url = str(details.get("poster_url") or "").strip()
+        if anime and poster_url and anime not in poster_by_title:
+            poster_by_title[anime] = poster_url
+        if anime and image_url and anime not in image_by_title:
+            image_by_title[anime] = image_url
 
-    library: list[dict] = []
+    groups: dict[str, dict] = {}
     for item in DOWNLOAD_DIR.iterdir():
         if not item.is_file() or item.suffix.lower() not in VIDEO_EXTENSIONS:
             continue
-        stat = item.stat()
-        info = meta_by_file.get(item.name, {})
-        title = str(info.get("anime") or item.stem)
-        image_url = str(info.get("image_url") or "")
-        library.append(
+
+        stem = item.stem
+        match = EPISODE_NAME_RE.match(stem)
+        if match:
+            title = match.group("title").strip()
+            episode = int(match.group("ep"))
+        else:
+            title = stem
+            episode = 1
+
+        group = groups.setdefault(
+            title,
             {
-                "filename": item.name,
                 "title": title,
-                "image_url": image_url,
-                "size_bytes": stat.st_size,
-                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                "media_url": "/media/" + urllib.parse.quote(item.name),
+                "downloaded_episodes": [],
+                "files_by_episode": {},
+                "latest_mtime": 0.0,
+            },
+        )
+        group["downloaded_episodes"].append(episode)
+        group["files_by_episode"][str(episode)] = {
+            "filename": item.name,
+            "media_url": "/media/" + urllib.parse.quote(item.name),
+        }
+        group["latest_mtime"] = max(group["latest_mtime"], item.stat().st_mtime)
+
+    result: list[dict] = []
+    for title, group in groups.items():
+        downloaded_sorted = sorted(set(int(ep) for ep in group["downloaded_episodes"]))
+        image_url = image_by_title.get(title, "")
+        poster_url = poster_by_title.get(title) or ensure_local_poster(title, image_url=image_url)
+        total_episodes = infer_total_episodes(title)
+        if total_episodes < (max(downloaded_sorted) if downloaded_sorted else 1):
+            total_episodes = max(downloaded_sorted) if downloaded_sorted else 1
+
+        result.append(
+            {
+                "title": title,
+                "poster_url": poster_url,
+                "total_episodes": total_episodes,
+                "downloaded_episodes": downloaded_sorted,
+                "files_by_episode": group["files_by_episode"],
+                "downloaded_count": len(downloaded_sorted),
+                "latest_mtime": group["latest_mtime"],
             }
         )
 
-    library.sort(key=lambda x: x["modified"], reverse=True)
-    return library
+    result.sort(key=lambda x: x["latest_mtime"], reverse=True)
+    return result
 
 
 PAGE_HTML = """<!doctype html>
@@ -410,6 +529,15 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   border: 0;
   cursor: pointer;
 }
+.ep-btn.downloaded {
+  background: #d1fae5;
+  color: #065f46;
+}
+.ep-btn.missing {
+  background: #cbd5e1;
+  color: #64748b;
+  cursor: not-allowed;
+}
 .actions { margin-top: 10px; display: grid; grid-template-columns: 1fr; gap: 6px; }
 .modal {
   position: fixed;
@@ -526,7 +654,6 @@ function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 function setStatus(msg) { statusEl.textContent = msg; }
-function toMB(sizeBytes) { return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`; }
 
 function renderHistory(items) {
   historyListEl.innerHTML = '';
@@ -564,34 +691,67 @@ function closePopupPlayer() {
   videoEl.pause();
 }
 
-function buildSeasonTab(item) {
+function buildSeasonTab(item, opts = {}) {
+  const isLibrary = Boolean(opts.library);
+  const downloadedEpisodes = new Set(opts.downloadedEpisodes || []);
+  const filesByEpisode = opts.filesByEpisode || {};
   selectedSeason = item;
-  seasonPosterEl.src = item.image_url || 'https://placehold.co/600x900?text=No+Poster';
-  seasonTitleEl.textContent = `#${item.index} ${item.name}`;
-  seasonCountEl.textContent = `${item.episodes} episodes`;
+  const title = item.name || item.title;
+  const totalEpisodes = item.episodes || item.total_episodes;
+  const poster = item.image_url || item.poster_url || 'https://placehold.co/600x900?text=No+Poster';
+  seasonPosterEl.src = poster;
+  seasonTitleEl.textContent = isLibrary ? title : `#${item.index} ${title}`;
+  if (isLibrary) {
+    seasonCountEl.textContent = `${downloadedEpisodes.size}/${totalEpisodes} downloaded`;
+    seasonDownloadEl.style.display = 'none';
+  } else {
+    seasonCountEl.textContent = `${totalEpisodes} episodes`;
+    seasonDownloadEl.style.display = '';
+  }
   seasonEpisodesEl.innerHTML = '';
-  for (let ep = 1; ep <= item.episodes; ep += 1) {
+  for (let ep = 1; ep <= totalEpisodes; ep += 1) {
     const btn = document.createElement('button');
     btn.className = 'ep-btn';
     btn.textContent = String(ep);
-    btn.onclick = async () => {
-      try {
-        setStatus(`Downloading ${item.name} episode ${ep}...`);
-        const res = await post('/api/play_episode', {
+    if (isLibrary && !downloadedEpisodes.has(ep)) {
+      btn.classList.add('missing');
+      btn.disabled = true;
+      btn.title = 'Not downloaded';
+    } else if (isLibrary && downloadedEpisodes.has(ep)) {
+      btn.classList.add('downloaded');
+      btn.onclick = () => {
+        const fileInfo = filesByEpisode[String(ep)];
+        if (!fileInfo) return;
+        openPopupPlayer(fileInfo.media_url, `${title} - Episode ${ep} (${fileInfo.filename})`);
+        setStatus(`Playing downloaded ${title} episode ${ep}`);
+        post('/api/history_event', {
+          event: 'play_downloaded_file',
+          anime: title,
+          filename: fileInfo.filename,
           query: queryEl.value.trim(),
-          mode: modeEl.value,
-          index: item.index,
-          episode: ep,
-          anime: item.name,
-          image_url: item.image_url || '',
-        });
-        openPopupPlayer(res.media_url, `${item.name} - Episode ${ep} (${res.filename})`);
-        setStatus(`Now playing ${item.name} episode ${ep}`);
-        loadHistory();
-      } catch (err) {
-        setStatus(`Error: ${err.message}`);
-      }
-    };
+        }).then(() => loadHistory()).catch(() => {});
+      };
+    } else {
+      btn.onclick = async () => {
+        try {
+          setStatus(`Downloading ${title} episode ${ep}...`);
+          const res = await post('/api/play_episode', {
+            query: queryEl.value.trim(),
+            mode: modeEl.value,
+            index: item.index,
+            episode: ep,
+            anime: title,
+            image_url: item.image_url || '',
+          });
+          openPopupPlayer(res.media_url, `${title} - Episode ${ep} (${res.filename})`);
+          setStatus(`Now playing ${title} episode ${ep}`);
+          loadHistory();
+          loadLibrary();
+        } catch (err) {
+          setStatus(`Error: ${err.message}`);
+        }
+      };
+    }
     seasonEpisodesEl.appendChild(btn);
   }
   seasonTabEl.classList.add('open');
@@ -649,35 +809,36 @@ function renderLibrary(items) {
   for (const item of items) {
     const card = document.createElement('div');
     card.className = 'card';
-    const title = esc(item.title || item.filename);
-    const imageUrl = item.image_url ? esc(item.image_url) : 'https://placehold.co/600x900?text=Downloaded';
+    const title = esc(item.title);
+    const imageUrl = item.poster_url ? esc(item.poster_url) : 'https://placehold.co/600x900?text=Downloaded';
     card.innerHTML = `
       <div class="poster-wrap" role="button" tabindex="0">
         <img class="poster" src="${imageUrl}" alt="${title}" />
-        <div class="tap-hint">play downloaded</div>
+        <div class="tap-hint">open season tab</div>
       </div>
       <div class="meta">
         <div class="title">${title}</div>
-        <div class="eps">${esc(item.filename)} · ${toMB(item.size_bytes)}</div>
+        <div class="eps">${item.downloaded_count}/${item.total_episodes} downloaded</div>
       </div>`;
 
-    const playDownloaded = () => {
-      openPopupPlayer(item.media_url, `${item.title} (${item.filename})`);
-      setStatus(`Playing downloaded file: ${item.filename}`);
-      post('/api/history_event', {
-        event: 'play_downloaded_file',
-        anime: item.title,
-        filename: item.filename,
-        query: queryEl.value.trim(),
-      }).then(() => loadHistory()).catch(() => {});
+    const openLibrarySeason = () => {
+      buildSeasonTab(
+        item,
+        {
+          library: true,
+          downloadedEpisodes: item.downloaded_episodes || [],
+          filesByEpisode: item.files_by_episode || {},
+        }
+      );
+      setStatus(`Opened library season: ${item.title}`);
     };
 
     const posterWrap = card.querySelector('.poster-wrap');
-    posterWrap.onclick = playDownloaded;
+    posterWrap.onclick = openLibrarySeason;
     posterWrap.onkeydown = (evt) => {
       if (evt.key === 'Enter' || evt.key === ' ') {
         evt.preventDefault();
-        playDownloaded();
+        openLibrarySeason();
       }
     };
 
@@ -810,6 +971,28 @@ class AniHandler(BaseHTTPRequestHandler):
                     break
                 self.wfile.write(chunk)
 
+    def _serve_poster(self, filename: str) -> None:
+        safe_name = Path(urllib.parse.unquote(filename)).name
+        target = (POSTER_DIR / safe_name).resolve()
+        if target.parent != POSTER_DIR.resolve() or not target.exists() or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "Poster not found")
+            return
+
+        ctype, _ = mimetypes.guess_type(str(target))
+        if not ctype:
+            ctype = "image/jpeg"
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(target.stat().st_size))
+        self.end_headers()
+        with target.open("rb") as f:
+            while True:
+                chunk = f.read(64 * 1024)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
 
@@ -819,6 +1002,10 @@ class AniHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/media/"):
             self._serve_media(parsed.path.replace("/media/", "", 1))
+            return
+
+        if parsed.path.startswith("/poster/"):
+            self._serve_poster(parsed.path.replace("/poster/", "", 1))
             return
 
         if parsed.path == "/api/search":
@@ -853,7 +1040,7 @@ class AniHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/library":
-            self._send_json(HTTPStatus.OK, {"items": list_library_items()})
+            self._send_json(HTTPStatus.OK, {"items": list_library_groups()})
             return
 
         if parsed.path == "/api/history":
@@ -877,12 +1064,17 @@ class AniHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/history_event":
+            anime_for_poster = str(payload.get("anime") or "").strip()
+            image_for_poster = str(payload.get("image_url") or "").strip()
+            poster_url = ensure_local_poster(anime_for_poster, image_for_poster) if anime_for_poster else ""
             append_history(
                 str(payload.get("event") or "event"),
                 {
-                    "anime": str(payload.get("anime") or "").strip(),
+                    "anime": anime_for_poster,
                     "filename": str(payload.get("filename") or "").strip(),
                     "query": str(payload.get("query") or "").strip(),
+                    "image_url": image_for_poster,
+                    "poster_url": poster_url,
                 },
             )
             self._send_json(HTTPStatus.OK, {"message": "history recorded"})
@@ -925,6 +1117,7 @@ class AniHandler(BaseHTTPRequestHandler):
 
             media_name = media_file.name
             media_url = "/media/" + urllib.parse.quote(media_name)
+            poster_url = ensure_local_poster(anime or query, image_url)
             append_history(
                 "play_episode",
                 {
@@ -933,6 +1126,7 @@ class AniHandler(BaseHTTPRequestHandler):
                     "episode": episode,
                     "filename": media_name,
                     "image_url": image_url,
+                    "poster_url": poster_url,
                 },
             )
             self._send_json(
@@ -955,6 +1149,7 @@ class AniHandler(BaseHTTPRequestHandler):
             if not ok:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
                 return
+            poster_url = ensure_local_poster(anime or query, image_url)
             append_history(
                 "download_season",
                 {
@@ -962,6 +1157,7 @@ class AniHandler(BaseHTTPRequestHandler):
                     "query": query,
                     "episodes": episodes,
                     "image_url": image_url,
+                    "poster_url": poster_url,
                 },
             )
             self._send_json(HTTPStatus.OK, {"message": msg})
