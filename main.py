@@ -964,12 +964,15 @@ class AniHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(target.stat().st_size))
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
-        with target.open("rb") as f:
-            while True:
-                chunk = f.read(64 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        try:
+            with target.open("rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _serve_poster(self, filename: str) -> None:
         safe_name = Path(urllib.parse.unquote(filename)).name
@@ -986,12 +989,15 @@ class AniHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(target.stat().st_size))
         self.end_headers()
-        with target.open("rb") as f:
-            while True:
-                chunk = f.read(64 * 1024)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        try:
+            with target.open("rb") as f:
+                while True:
+                    chunk = f.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
