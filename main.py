@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import mimetypes
 import os
@@ -35,6 +36,8 @@ SEARCH_QUERY = (
 DOWNLOAD_DIR = Path(__file__).resolve().parent / "downloads"
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DOWNLOAD_LOCK = threading.Lock()
+HISTORY_FILE = Path(__file__).resolve().parent / "history.json"
+HISTORY_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,59 @@ class AnimeResult:
     name: str
     episodes: int
     image_url: str
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_history() -> list[dict]:
+    if not HISTORY_FILE.exists():
+        return []
+    try:
+        data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_history(items: list[dict]) -> None:
+    HISTORY_FILE.write_text(json.dumps(items, indent=2), encoding="utf-8")
+
+
+def append_history(event: str, details: dict) -> None:
+    with HISTORY_LOCK:
+        items = load_history()
+        items.append({"time": utc_now_iso(), "event": event, "details": details})
+        items = items[-300:]
+        save_history(items)
+
+
+def latest_history(limit: int = 25) -> list[dict]:
+    with HISTORY_LOCK:
+        items = load_history()
+    return list(reversed(items[-limit:]))
+
+
+def history_summaries(limit: int = 25) -> list[dict]:
+    items = latest_history(limit=limit)
+    output: list[dict] = []
+    for item in items:
+        event = str(item.get("event") or "event")
+        details = item.get("details") or {}
+        when = str(item.get("time") or "")
+        anime = str(details.get("anime") or details.get("query") or "")
+        episode = details.get("episode")
+        if event == "play_episode":
+            summary = f"{when} · played {anime} episode {episode}"
+        elif event == "play_downloaded_file":
+            summary = f"{when} · played downloaded {anime or details.get('filename')}"
+        elif event == "download_season":
+            summary = f"{when} · started season download for {anime}"
+        else:
+            summary = f"{when} · {event}"
+        output.append({"time": when, "event": event, "summary": summary, "details": details})
+    return output
 
 
 def fetch_json(url: str, headers: dict[str, str] | None = None, timeout: int = 25) -> dict:
@@ -177,6 +233,38 @@ def start_background_season_download(query: str, mode: str, search_index: int, e
     return True, f"Started full season download (1-{episodes})"
 
 
+def list_library_items() -> list[dict]:
+    history_items = latest_history(limit=300)
+    meta_by_file: dict[str, dict] = {}
+    for entry in history_items:
+        details = entry.get("details") or {}
+        filename = details.get("filename")
+        if isinstance(filename, str) and filename and filename not in meta_by_file:
+            meta_by_file[filename] = details
+
+    library: list[dict] = []
+    for item in DOWNLOAD_DIR.iterdir():
+        if not item.is_file() or item.suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        stat = item.stat()
+        info = meta_by_file.get(item.name, {})
+        title = str(info.get("anime") or item.stem)
+        image_url = str(info.get("image_url") or "")
+        library.append(
+            {
+                "filename": item.name,
+                "title": title,
+                "image_url": image_url,
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                "media_url": "/media/" + urllib.parse.quote(item.name),
+            }
+        )
+
+    library.sort(key=lambda x: x["modified"], reverse=True)
+    return library
+
+
 PAGE_HTML = """<!doctype html>
 <html lang=\"en\">
 <head>
@@ -230,6 +318,27 @@ button {
 button.alt { background: linear-gradient(90deg, #1d3557, #457b9d); }
 button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 #status { min-height: 22px; margin-bottom: 10px; color: #dbe7f3; }
+.history-box {
+  background: rgba(5, 12, 24, 0.55);
+  border: 1px solid rgba(203, 213, 225, 0.18);
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+}
+.history-box h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: #dbe7f3;
+}
+#historyList {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 130px;
+  overflow: auto;
+  color: #dbe7f3;
+  font-size: 13px;
+}
+#historyList li { margin-bottom: 4px; }
 .season-tab {
   display: none;
   grid-template-columns: 170px 1fr;
@@ -334,6 +443,11 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   display: block;
 }
 .close-btn { padding: 8px 12px; }
+.view-title {
+  margin: 0 0 10px;
+  font-size: 16px;
+  color: #e2e8f0;
+}
 @media (max-width: 700px) {
   .search { grid-template-columns: 1fr; }
   .season-tab { grid-template-columns: 1fr; }
@@ -344,7 +458,7 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
 <body>
 <div class=\"wrap\">
   <h1>ani-cli Browser Player</h1>
-  <p class=\"sub\">Click any poster to open a season tab. Select an episode to download then play in a popup. Port 9119.</p>
+  <p class=\"sub\">No query shows your downloaded library. Search to open seasons, then pick episodes to download+play in popup. Port 9119.</p>
 
   <div class=\"search\">
     <input id=\"query\" placeholder=\"Search anime\" />
@@ -353,6 +467,10 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
   </div>
 
   <div id=\"status\">Ready.</div>
+  <div class=\"history-box\">
+    <h3>History</h3>
+    <ol id=\"historyList\"></ol>
+  </div>
 
   <div id=\"seasonTab\" class=\"season-tab\">
     <img id=\"seasonPoster\" alt=\"season poster\" />
@@ -369,6 +487,7 @@ button.ok { background: linear-gradient(90deg, #1f7a8c, var(--ok)); }
     </div>
   </div>
 
+  <h2 id=\"viewTitle\" class=\"view-title\">Downloaded Library</h2>
   <div id=\"results\" class=\"grid\"></div>
 </div>
 
@@ -387,6 +506,8 @@ const queryEl = document.getElementById('query');
 const modeEl = document.getElementById('mode');
 const searchBtn = document.getElementById('searchBtn');
 const statusEl = document.getElementById('status');
+const historyListEl = document.getElementById('historyList');
+const viewTitleEl = document.getElementById('viewTitle');
 const resultsEl = document.getElementById('results');
 const videoEl = document.getElementById('video');
 const videoMetaEl = document.getElementById('videoMeta');
@@ -405,6 +526,20 @@ function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 }
 function setStatus(msg) { statusEl.textContent = msg; }
+function toMB(sizeBytes) { return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`; }
+
+function renderHistory(items) {
+  historyListEl.innerHTML = '';
+  if (!items.length) {
+    historyListEl.innerHTML = '<li>No history yet.</li>';
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement('li');
+    li.textContent = item.summary || 'unknown event';
+    historyListEl.appendChild(li);
+  }
+}
 
 async function post(path, payload) {
   const resp = await fetch(path, {
@@ -447,9 +582,12 @@ function buildSeasonTab(item) {
           mode: modeEl.value,
           index: item.index,
           episode: ep,
+          anime: item.name,
+          image_url: item.image_url || '',
         });
         openPopupPlayer(res.media_url, `${item.name} - Episode ${ep} (${res.filename})`);
         setStatus(`Now playing ${item.name} episode ${ep}`);
+        loadHistory();
       } catch (err) {
         setStatus(`Error: ${err.message}`);
       }
@@ -460,6 +598,7 @@ function buildSeasonTab(item) {
 }
 
 function render(items) {
+  viewTitleEl.textContent = 'Search Results';
   selectedSeason = null;
   seasonTabEl.classList.remove('open');
   resultsEl.innerHTML = '';
@@ -497,6 +636,55 @@ function render(items) {
   }
 }
 
+function renderLibrary(items) {
+  viewTitleEl.textContent = 'Downloaded Library';
+  selectedSeason = null;
+  seasonTabEl.classList.remove('open');
+  resultsEl.innerHTML = '';
+  if (!items.length) {
+    resultsEl.innerHTML = '<div>No downloads yet.</div>';
+    return;
+  }
+
+  for (const item of items) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = esc(item.title || item.filename);
+    const imageUrl = item.image_url ? esc(item.image_url) : 'https://placehold.co/600x900?text=Downloaded';
+    card.innerHTML = `
+      <div class="poster-wrap" role="button" tabindex="0">
+        <img class="poster" src="${imageUrl}" alt="${title}" />
+        <div class="tap-hint">play downloaded</div>
+      </div>
+      <div class="meta">
+        <div class="title">${title}</div>
+        <div class="eps">${esc(item.filename)} · ${toMB(item.size_bytes)}</div>
+      </div>`;
+
+    const playDownloaded = () => {
+      openPopupPlayer(item.media_url, `${item.title} (${item.filename})`);
+      setStatus(`Playing downloaded file: ${item.filename}`);
+      post('/api/history_event', {
+        event: 'play_downloaded_file',
+        anime: item.title,
+        filename: item.filename,
+        query: queryEl.value.trim(),
+      }).then(() => loadHistory()).catch(() => {});
+    };
+
+    const posterWrap = card.querySelector('.poster-wrap');
+    posterWrap.onclick = playDownloaded;
+    posterWrap.onkeydown = (evt) => {
+      if (evt.key === 'Enter' || evt.key === ' ') {
+        evt.preventDefault();
+        playDownloaded();
+      }
+    };
+
+    resultsEl.appendChild(card);
+  }
+}
+
 seasonDownloadEl.onclick = async () => {
   if (!selectedSeason) return;
   try {
@@ -506,8 +694,11 @@ seasonDownloadEl.onclick = async () => {
       mode: modeEl.value,
       index: selectedSeason.index,
       episodes: selectedSeason.episodes,
+      anime: selectedSeason.name,
+      image_url: selectedSeason.image_url || '',
     });
     setStatus(res.message);
+    loadHistory();
   } catch (err) {
     setStatus(`Error: ${err.message}`);
   }
@@ -526,7 +717,8 @@ playerModalEl.onclick = (evt) => {
 async function doSearch() {
   const q = queryEl.value.trim();
   if (!q) {
-    setStatus('Enter an anime title first.');
+    await loadLibrary();
+    await loadHistory();
     return;
   }
   setStatus('Searching...');
@@ -544,8 +736,34 @@ async function doSearch() {
   }
 }
 
+async function loadLibrary() {
+  setStatus('Loading downloaded library...');
+  try {
+    const resp = await fetch('/api/library');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'library failed');
+    renderLibrary(data.items || []);
+    setStatus(`Loaded ${(data.items || []).length} downloaded file(s).`);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+}
+
+async function loadHistory() {
+  try {
+    const resp = await fetch('/api/history');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || 'history failed');
+    renderHistory(data.items || []);
+  } catch {
+    renderHistory([]);
+  }
+}
+
 searchBtn.onclick = doSearch;
 queryEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
+loadLibrary();
+loadHistory();
 </script>
 </body>
 </html>
@@ -634,11 +852,19 @@ class AniHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, payload)
             return
 
+        if parsed.path == "/api/library":
+            self._send_json(HTTPStatus.OK, {"items": list_library_items()})
+            return
+
+        if parsed.path == "/api/history":
+            self._send_json(HTTPStatus.OK, {"items": history_summaries(limit=30)})
+            return
+
         self._send_html(HTTPStatus.NOT_FOUND, "<h1>Not found</h1>")
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/play_episode", "/api/download_season"}:
+        if parsed.path not in {"/api/play_episode", "/api/download_season", "/api/history_event"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
 
@@ -650,7 +876,21 @@ class AniHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
             return
 
+        if parsed.path == "/api/history_event":
+            append_history(
+                str(payload.get("event") or "event"),
+                {
+                    "anime": str(payload.get("anime") or "").strip(),
+                    "filename": str(payload.get("filename") or "").strip(),
+                    "query": str(payload.get("query") or "").strip(),
+                },
+            )
+            self._send_json(HTTPStatus.OK, {"message": "history recorded"})
+            return
+
         query = str(payload.get("query") or "").strip()
+        anime = str(payload.get("anime") or query).strip()
+        image_url = str(payload.get("image_url") or "").strip()
         mode = str(payload.get("mode") or "dub").strip()
         if mode not in {"dub", "sub"}:
             mode = "dub"
@@ -685,6 +925,16 @@ class AniHandler(BaseHTTPRequestHandler):
 
             media_name = media_file.name
             media_url = "/media/" + urllib.parse.quote(media_name)
+            append_history(
+                "play_episode",
+                {
+                    "anime": anime or query,
+                    "query": query,
+                    "episode": episode,
+                    "filename": media_name,
+                    "image_url": image_url,
+                },
+            )
             self._send_json(
                 HTTPStatus.OK,
                 {"message": msg, "filename": media_name, "media_url": media_url, "episode": episode},
@@ -705,6 +955,15 @@ class AniHandler(BaseHTTPRequestHandler):
             if not ok:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
                 return
+            append_history(
+                "download_season",
+                {
+                    "anime": anime or query,
+                    "query": query,
+                    "episodes": episodes,
+                    "image_url": image_url,
+                },
+            )
             self._send_json(HTTPStatus.OK, {"message": msg})
             return
 

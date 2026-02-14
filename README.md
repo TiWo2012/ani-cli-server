@@ -5,9 +5,11 @@ Web app for `ani-cli` on port `9119`.
 ## What it does
 
 - Search anime (`dub` default, optional `sub`)
+- Launch with no search query to browse downloaded library immediately
 - Click a poster to open a season tab with episode buttons
 - Click an episode to **download first**, then play it in a **popup video player**
 - Optional full-season download button
+- Keeps local watch/download history in `history.json`
 
 ## Run
 
@@ -30,4 +32,5 @@ http://127.0.0.1:9119
 ## Notes
 
 - Downloaded video files are stored in `downloads/`.
+- Startup view shows items from `downloads/` when no query is entered.
 - Browser playback support depends on the downloaded container/codec.
