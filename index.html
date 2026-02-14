@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ani-cli browser player</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="wrap">
+    <h1>ani-cli Browser Player</h1>
+    <p class="sub">No query shows your downloaded library. Search to open seasons, then pick episodes to download+play in popup. Port 9119.</p>
+
+    <div class="search">
+      <input id="query" placeholder="Search anime" />
+      <select id="mode"><option value="dub" selected>dub</option><option value="sub">sub</option></select>
+      <button id="searchBtn">Search</button>
+    </div>
+
+    <div class="status-row">
+      <div id="status">Ready.</div>
+      <div id="spinner" class="spinner"></div>
+    </div>
+
+    <div id="seasonTab" class="season-tab">
+      <img id="seasonPoster" alt="season poster" />
+      <div>
+        <div class="head">
+          <strong id="seasonTitle">Season</strong>
+          <button id="seasonClose" class="alt">Close</button>
+        </div>
+        <div id="seasonCount" class="count"></div>
+        <div id="seasonEpisodes" class="ep-grid"></div>
+        <div class="actions">
+          <button id="seasonDownload" class="ok">Download Full Season</button>
+        </div>
+      </div>
+    </div>
+
+    <h2 id="viewTitle" class="view-title">Downloaded Library</h2>
+    <div id="results" class="grid"></div>
+
+    <div id="historyBox" class="history-box collapsed">
+      <div class="history-head">
+        <h3>History (last 10)</h3>
+        <button id="historyToggle" class="history-toggle alt">Show</button>
+      </div>
+      <ol id="historyList"></ol>
+    </div>
+  </div>
+
+  <div id="playerModal" class="modal">
+    <div class="modal-panel">
+      <div class="modal-top">
+        <div id="videoMeta">No episode loaded.</div>
+        <button id="modalClose" class="close-btn alt">Close</button>
+      </div>
+      <video id="video" controls></video>
+    </div>
+  </div>
+
+  <script src="/script.js"></script>
+</body>
+</html>

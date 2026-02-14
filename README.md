@@ -1,6 +1,7 @@
 # ani-cli-ui (web)
 
 Web app for `ani-cli` on port `9119`.
+Frontend is split into `index.html`, `style.css`, and `script.js`.
 
 ## What it does
 
