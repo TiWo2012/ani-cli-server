@@ -95,12 +95,24 @@ def history_summaries(limit: int = 10) -> list[dict]:
         details = item.get("details") or {}
         anime = str(details.get("anime") or details.get("query") or "")
         episode = details.get("episode")
+        if episode is None:
+            filename = str(details.get("filename") or "")
+            match = EPISODE_NAME_RE.match(Path(filename).stem)
+            if match:
+                episode = int(match.group("ep"))
         if event == "play_episode":
             summary = f"Played {anime} episode {episode}"
         elif event == "play_downloaded_file":
-            summary = f"Played downloaded {anime or details.get('filename')}"
+            if episode is not None:
+                summary = f"Played downloaded {anime or details.get('filename')} episode {episode}"
+            else:
+                summary = f"Played downloaded {anime or details.get('filename')}"
         elif event == "download_season":
-            summary = f"Started season download for {anime}"
+            episodes = details.get("episodes")
+            if episodes:
+                summary = f"Started season download for {anime} (1-{episodes})"
+            else:
+                summary = f"Started season download for {anime}"
         else:
             summary = event.replace("_", " ").capitalize()
         output.append({"event": event, "summary": summary, "details": details})
@@ -314,6 +326,26 @@ def start_background_season_download(query: str, mode: str, search_index: int, e
     except Exception as exc:
         return False, str(exc)
     return True, f"Started full season download (1-{episodes})"
+
+
+def start_background_season_download_by_title(title: str, mode: str = "dub") -> tuple[bool, str, int]:
+    query = title.strip()
+    if not query:
+        return False, "title required", 0
+    try:
+        results = search_anime(query, mode=mode)
+    except Exception as exc:
+        return False, f"search failed: {exc}", 0
+    if not results:
+        return False, f"no search results for {query}", 0
+    match = best_search_match(query, results)
+    if match is None:
+        return False, f"no usable match for {query}", 0
+    episodes = match.episodes
+    ok, msg = start_background_season_download(query=title, mode=mode, search_index=results.index(match) + 1, episodes=episodes)
+    if not ok:
+        return False, msg, 0
+    return True, msg, episodes
 
 
 def list_library_groups() -> list[dict]:
@@ -560,6 +592,7 @@ button:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow
 .meta { padding: 10px; }
 .title { font-size: 14px; font-weight: 700; line-height: 1.35; min-height: 38px; margin-bottom: 4px; }
 .eps { color: var(--muted); font-size: 13px; margin-bottom: 0; }
+.card-actions { margin-top: 8px; }
 .ep-btn {
   border-radius: 8px;
   padding: 6px;
@@ -887,6 +920,9 @@ function renderLibrary(items) {
       <div class="meta">
         <div class="title">${title}</div>
         <div class="eps">${item.downloaded_count}/${item.total_episodes} downloaded</div>
+        <div class="card-actions">
+          <button class="ok" data-download-all>Download All</button>
+        </div>
       </div>`;
 
     const openLibrarySeason = () => {
@@ -902,11 +938,28 @@ function renderLibrary(items) {
     };
 
     const posterWrap = card.querySelector('.poster-wrap');
+    const downloadAllBtn = card.querySelector('[data-download-all]');
     posterWrap.onclick = openLibrarySeason;
     posterWrap.onkeydown = (evt) => {
       if (evt.key === 'Enter' || evt.key === ' ') {
         evt.preventDefault();
         openLibrarySeason();
+      }
+    };
+    downloadAllBtn.onclick = async () => {
+      try {
+        setLoading(true, `Starting download-all for ${item.title}...`);
+        const res = await post('/api/download_all_by_title', {
+          title: item.title,
+          mode: modeEl.value,
+          image_url: item.poster_url || '',
+        });
+        setStatus(res.message);
+        loadHistory();
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+      } finally {
+        setLoading(false);
       }
     };
 
@@ -1135,7 +1188,7 @@ class AniHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/play_episode", "/api/download_season", "/api/history_event"}:
+        if parsed.path not in {"/api/play_episode", "/api/download_season", "/api/history_event", "/api/download_all_by_title"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
 
@@ -1145,6 +1198,33 @@ class AniHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid json"})
+            return
+
+        if parsed.path == "/api/download_all_by_title":
+            title = str(payload.get("title") or "").strip()
+            mode = str(payload.get("mode") or "dub").strip()
+            if mode not in {"dub", "sub"}:
+                mode = "dub"
+            image_url = str(payload.get("image_url") or "").strip()
+            if not title:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "title required"})
+                return
+            ok, msg, episodes = start_background_season_download_by_title(title=title, mode=mode)
+            if not ok:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": msg})
+                return
+            poster_url = ensure_local_poster(title, image_url)
+            append_history(
+                "download_season",
+                {
+                    "anime": title,
+                    "query": title,
+                    "episodes": episodes,
+                    "image_url": image_url,
+                    "poster_url": poster_url,
+                },
+            )
+            self._send_json(HTTPStatus.OK, {"message": f"Download all started for {title} (1-{episodes})"})
             return
 
         if parsed.path == "/api/history_event":
