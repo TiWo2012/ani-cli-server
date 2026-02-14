@@ -2,7 +2,8 @@
 
 Python `tkinter` UI for searching anime using the same backend as `ani-cli`, with a download action that launches `ani-cli --download` for the selected result.
 
-You can select the exact episode in the UI before starting the download.
+Default mode is `dub`.
+Selecting a result and downloading grabs the full available episode range (entire season), not a single episode.
 
 ## Run
 

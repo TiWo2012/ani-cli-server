@@ -96,10 +96,8 @@ class AniCliUI:
         self.worker_queue: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self.query_var = tk.StringVar()
-        self.mode_var = tk.StringVar(value="sub")
+        self.mode_var = tk.StringVar(value="dub")
         self.status_var = tk.StringVar(value="Ready")
-        self.episode_var = tk.IntVar(value=1)
-        self.episode_info_var = tk.StringVar(value="Select a result")
 
         self._build_layout()
         self.root.after(100, self._process_queue)
@@ -144,7 +142,6 @@ class AniCliUI:
         self.tree.column("title", width=720)
         self.tree.column("episodes", width=120, anchor=tk.CENTER, stretch=False)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", lambda _: self.download_selected())
 
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -161,18 +158,6 @@ class AniCliUI:
             state=tk.DISABLED,
         )
         self.watch_btn.pack(side=tk.LEFT)
-
-        ttk.Label(controls, text="Episode:").pack(side=tk.LEFT, padx=(12, 4))
-        self.episode_spinbox = ttk.Spinbox(
-            controls,
-            from_=1,
-            to=1,
-            textvariable=self.episode_var,
-            width=7,
-            state=tk.DISABLED,
-        )
-        self.episode_spinbox.pack(side=tk.LEFT)
-        ttk.Label(controls, textvariable=self.episode_info_var).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(controls, textvariable=self.status_var).pack(side=tk.RIGHT)
 
@@ -229,29 +214,7 @@ class AniCliUI:
             self.tree.insert("", tk.END, iid=str(i), values=(i, result.name, result.episodes))
 
         self.watch_btn.configure(state=tk.NORMAL if results else tk.DISABLED)
-        self._set_episode_limit(None)
         self.status_var.set(f"Found {len(results)} result(s)")
-
-    def _on_tree_select(self, _: object) -> None:
-        selected = self.tree.selection()
-        if not selected:
-            self._set_episode_limit(None)
-            return
-
-        idx = int(selected[0])
-        result = self.results[idx - 1]
-        self._set_episode_limit(result.episodes)
-
-    def _set_episode_limit(self, max_episode: int | None) -> None:
-        if max_episode is None or max_episode < 1:
-            self.episode_var.set(1)
-            self.episode_spinbox.configure(state=tk.DISABLED, from_=1, to=1)
-            self.episode_info_var.set("Select a result")
-            return
-
-        self.episode_var.set(1)
-        self.episode_spinbox.configure(state="normal", from_=1, to=max_episode)
-        self.episode_info_var.set(f"1..{max_episode}")
 
     def download_selected(self) -> None:
         if not self.results:
@@ -265,18 +228,15 @@ class AniCliUI:
         idx = int(selected[0])
         result = self.results[idx - 1]
         query = self.query_var.get().strip()
-        mode = self.mode_var.get().strip() or "sub"
-        episode = self.episode_var.get()
-        if episode < 1 or episode > result.episodes:
-            messagebox.showerror("Episode", f"Pick an episode between 1 and {result.episodes}.")
-            return
+        mode = self.mode_var.get().strip() or "dub"
+        season_range = f"1-{result.episodes}"
 
-        cmd = ["ani-cli", "-d", "-S", str(idx), "-e", str(episode)]
+        cmd = ["ani-cli", "-d", "-S", str(idx), "-e", season_range]
         if mode == "dub":
             cmd.append("--dub")
         cmd.append(query)
 
-        self.status_var.set(f"Starting download: {result.name} episode {episode}...")
+        self.status_var.set(f"Starting full-season download: {result.name} ({season_range})...")
         try:
             subprocess.Popen(cmd)
         except FileNotFoundError:
@@ -288,13 +248,13 @@ class AniCliUI:
             self.status_var.set("Download failed")
             return
 
-        self.status_var.set(f"Download started: episode {episode}")
+        self.status_var.set(f"Download started: episodes {season_range}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ani-cli tkinter UI")
     parser.add_argument("--cli-search", metavar="QUERY", help="Run one search in CLI mode and print results")
-    parser.add_argument("--mode", choices=("sub", "dub"), default="sub", help="Translation mode for --cli-search")
+    parser.add_argument("--mode", choices=("sub", "dub"), default="dub", help="Translation mode for --cli-search")
     return parser.parse_args()
 
 
